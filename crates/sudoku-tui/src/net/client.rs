@@ -20,6 +20,11 @@ fn http_base_url() -> String {
         .replace("ws://", "http://")
 }
 
+fn is_local_server() -> bool {
+    let url = server_url();
+    url.contains("localhost") || url.contains("127.0.0.1")
+}
+
 fn auth_file_path() -> PathBuf {
     let config_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -127,8 +132,11 @@ impl NetworkClient {
         Ok(profile)
     }
 
-    /// Save auth token to disk
+    /// Save auth token to disk (skipped for local dev servers)
     pub fn save_token(token: &str, username: &str) -> std::io::Result<()> {
+        if is_local_server() {
+            return Ok(());
+        }
         let path = auth_file_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -141,8 +149,11 @@ impl NetworkClient {
         std::fs::write(path, json)
     }
 
-    /// Load saved auth token from disk
+    /// Load saved auth token from disk (skipped for local dev servers)
     pub fn load_token() -> Option<(String, String)> {
+        if is_local_server() {
+            return None;
+        }
         let path = auth_file_path();
         let data = std::fs::read_to_string(path).ok()?;
         let auth: AuthData = serde_json::from_str(&data).ok()?;
