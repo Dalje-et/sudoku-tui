@@ -1,6 +1,8 @@
 #[tokio::main]
 async fn main() {
-    let (app, _state) = sudoku_server::build_app("sqlite:sudoku.db?mode=rwc").await;
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite:sudoku.db?mode=rwc".to_string());
+    let (app, _state) = sudoku_server::build_app(&db_url).await;
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let addr = format!("0.0.0.0:{}", port);
