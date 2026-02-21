@@ -1,7 +1,7 @@
 mod app;
 mod game;
 mod hint;
-mod puzzle;
+mod net;
 mod ui;
 
 fn main() {

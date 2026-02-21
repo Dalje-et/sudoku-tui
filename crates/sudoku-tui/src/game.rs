@@ -1,8 +1,8 @@
 use crate::hint::{find_hint, Hint, HintStage};
-use crate::puzzle::{
-    generate_puzzle, get_all_conflicts, get_candidates, is_board_complete, Board, Cell, Difficulty,
-    SolutionBoard,
-};
+use sudoku_core::protocol::LeaderboardEntry;
+use sudoku_core::puzzle::generate_puzzle;
+use sudoku_core::validation::{get_all_conflicts, get_candidates, is_board_complete};
+use sudoku_core::{Board, Cell, Difficulty, SolutionBoard};
 use std::time::Instant;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,6 +11,12 @@ pub enum GameState {
     Playing,
     Paused,
     Won,
+    MultiplayerMenu,
+    AuthScreen,
+    Lobby,
+    MultiplayerPlaying,
+    MultiplayerEnd,
+    Leaderboard,
 }
 
 #[derive(Clone, Debug)]
@@ -33,6 +39,39 @@ pub enum Move {
     },
 }
 
+/// Multiplayer-specific state
+pub struct MultiplayerState {
+    pub opponent_name: String,
+    pub opponent_rating: i32,
+    pub mode: sudoku_core::protocol::GameMode,
+    /// Race mode: opponent's filled cell count
+    pub opponent_filled: u32,
+    /// Race mode: opponent's momentum (placements/min)
+    pub opponent_momentum: f32,
+    /// Shared mode: opponent's cursor position
+    pub opponent_cursor: Option<(usize, usize)>,
+    /// Shared mode: cell ownership (who placed what)
+    pub cell_owner: [[CellOwner; 9]; 9],
+    /// Game result
+    pub result: Option<GameResult>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellOwner {
+    None,
+    Mine,
+    Opponent,
+    Given,
+}
+
+pub struct GameResult {
+    pub won: bool,
+    pub your_score: u32,
+    pub opponent_score: u32,
+    pub elo_change: i32,
+    pub new_rating: i32,
+}
+
 pub struct Game {
     pub board: Board,
     pub solution: SolutionBoard,
@@ -53,6 +92,26 @@ pub struct Game {
     pub hint_stage: HintStage,
     pub hints_used: u32,
     pub show_quit_confirm: bool,
+    // Multiplayer
+    pub multiplayer: Option<MultiplayerState>,
+    // Menu selection index for multiplayer menu
+    pub menu_selection: usize,
+    // Auth
+    pub auth_code: Option<String>,
+    pub auth_uri: Option<String>,
+    pub auth_status: Option<String>,
+    // Lobby
+    pub room_code: Option<String>,
+    // Room code input buffer for joining
+    pub room_input: String,
+    // Joining mode active
+    pub joining_room: bool,
+    // Auth polling state
+    pub auth_polling: bool,
+    pub auth_poll_interval: u64,
+    // Leaderboard
+    pub leaderboard_entries: Vec<LeaderboardEntry>,
+    pub leaderboard_scroll: usize,
 }
 
 impl Game {
@@ -77,6 +136,18 @@ impl Game {
             hint_stage: HintStage::ShowTechnique,
             hints_used: 0,
             show_quit_confirm: false,
+            multiplayer: None,
+            menu_selection: 0,
+            auth_code: None,
+            auth_uri: None,
+            auth_status: None,
+            room_code: None,
+            room_input: String::new(),
+            joining_room: false,
+            auth_polling: false,
+            auth_poll_interval: 5,
+            leaderboard_entries: Vec::new(),
+            leaderboard_scroll: 0,
         }
     }
 
@@ -99,6 +170,54 @@ impl Game {
         self.active_hint = None;
         self.hints_used = 0;
         self.show_quit_confirm = false;
+        self.multiplayer = None;
+    }
+
+    pub fn start_multiplayer_game(
+        &mut self,
+        board: Board,
+        solution: SolutionBoard,
+        mode: sudoku_core::protocol::GameMode,
+        opponent_name: String,
+        opponent_rating: i32,
+    ) {
+        self.board = board;
+        self.solution = solution;
+        self.pencil_marks = std::array::from_fn(|_| std::array::from_fn(|_| Vec::new()));
+        self.selected_row = 4;
+        self.selected_col = 4;
+        self.state = GameState::MultiplayerPlaying;
+        self.pencil_mode = false;
+        self.mistakes = 0;
+        self.move_history.clear();
+        self.timer_start = Some(Instant::now());
+        self.elapsed_secs = 0;
+        self.paused_elapsed = 0;
+        self.conflicts.clear();
+        self.show_conflicts = false;
+        self.active_hint = None;
+        self.hints_used = 0;
+        self.show_quit_confirm = false;
+
+        let mut cell_owner = [[CellOwner::None; 9]; 9];
+        for r in 0..9 {
+            for c in 0..9 {
+                if board[r][c].is_given() {
+                    cell_owner[r][c] = CellOwner::Given;
+                }
+            }
+        }
+
+        self.multiplayer = Some(MultiplayerState {
+            opponent_name,
+            opponent_rating,
+            mode,
+            opponent_filled: 0,
+            opponent_momentum: 0.0,
+            opponent_cursor: None,
+            cell_owner,
+            result: None,
+        });
     }
 
     pub fn move_cursor(&mut self, dr: i32, dc: i32) {
@@ -109,7 +228,7 @@ impl Game {
     }
 
     pub fn place_number(&mut self, num: u8) {
-        if self.state != GameState::Playing {
+        if self.state != GameState::Playing && self.state != GameState::MultiplayerPlaying {
             return;
         }
         let r = self.selected_row;
@@ -119,7 +238,16 @@ impl Game {
             return;
         }
 
-        if self.pencil_mode {
+        // In multiplayer shared mode, can't overwrite opponent's cells
+        if let Some(ref mp) = self.multiplayer {
+            if mp.mode == sudoku_core::protocol::GameMode::Shared
+                && mp.cell_owner[r][c] == CellOwner::Opponent
+            {
+                return;
+            }
+        }
+
+        if self.pencil_mode && self.state == GameState::Playing {
             self.toggle_pencil_mark(num);
             return;
         }
@@ -128,22 +256,28 @@ impl Game {
         let new = Cell::UserInput(num);
         self.board[r][c] = new;
         self.pencil_marks[r][c].clear();
-
-        // Remove this number from pencil marks in same row/col/box
         self.clear_related_pencil_marks(r, c, num);
+        self.move_history.push(Move::PlaceNumber {
+            row: r,
+            col: c,
+            old,
+            new,
+        });
 
-        self.move_history.push(Move::PlaceNumber { row: r, col: c, old, new });
-
-        // Check if it's wrong
         if self.solution[r][c] != num {
             self.mistakes += 1;
         }
 
-        // Update conflicts
         self.conflicts = get_all_conflicts(&self.board);
 
-        // Check win
-        if is_board_complete(&self.board) {
+        // Mark cell ownership in multiplayer
+        if let Some(ref mut mp) = self.multiplayer {
+            if mp.cell_owner[r][c] == CellOwner::None {
+                mp.cell_owner[r][c] = CellOwner::Mine;
+            }
+        }
+
+        if self.state == GameState::Playing && is_board_complete(&self.board) {
             self.state = GameState::Won;
             if let Some(start) = self.timer_start {
                 self.elapsed_secs = self.paused_elapsed + start.elapsed().as_secs();
@@ -152,15 +286,12 @@ impl Game {
     }
 
     fn clear_related_pencil_marks(&mut self, row: usize, col: usize, val: u8) {
-        // Row
         for c in 0..9 {
             self.pencil_marks[row][c].retain(|&v| v != val);
         }
-        // Col
         for r in 0..9 {
             self.pencil_marks[r][col].retain(|&v| v != val);
         }
-        // Box
         let box_r = (row / 3) * 3;
         let box_c = (col / 3) * 3;
         for r in box_r..box_r + 3 {
@@ -193,7 +324,7 @@ impl Game {
     }
 
     pub fn erase(&mut self) {
-        if self.state != GameState::Playing {
+        if self.state != GameState::Playing && self.state != GameState::MultiplayerPlaying {
             return;
         }
         let r = self.selected_row;
@@ -203,10 +334,20 @@ impl Game {
             return;
         }
 
+        // In multiplayer shared mode, can only erase own cells
+        if let Some(ref mp) = self.multiplayer {
+            if mp.mode == sudoku_core::protocol::GameMode::Shared
+                && mp.cell_owner[r][c] != CellOwner::Mine
+            {
+                return;
+            }
+        }
+
         if let Cell::UserInput(_) = self.board[r][c] {
             let old = self.board[r][c];
             self.board[r][c] = Cell::Empty;
-            self.move_history.push(Move::Erase { row: r, col: c, old });
+            self.move_history
+                .push(Move::Erase { row: r, col: c, old });
             self.conflicts = get_all_conflicts(&self.board);
         } else if !self.pencil_marks[r][c].is_empty() {
             self.pencil_marks[r][c].clear();
@@ -250,13 +391,11 @@ impl Game {
         }
 
         if self.active_hint.is_some() {
-            // Advance hint stage
             match self.hint_stage {
                 HintStage::ShowTechnique => {
                     self.hint_stage = HintStage::RevealValue;
                 }
                 HintStage::RevealValue => {
-                    // Apply the hint
                     if let Some(ref hint) = self.active_hint {
                         let r = hint.target_row;
                         let c = hint.target_col;
@@ -313,16 +452,16 @@ impl Game {
 
     pub fn get_elapsed_secs(&self) -> u64 {
         match self.state {
-            GameState::Won => self.elapsed_secs,
+            GameState::Won | GameState::MultiplayerEnd => self.elapsed_secs,
             GameState::Paused => self.paused_elapsed,
-            GameState::Playing => {
+            GameState::Playing | GameState::MultiplayerPlaying => {
                 self.paused_elapsed
                     + self
                         .timer_start
                         .map(|s| s.elapsed().as_secs())
                         .unwrap_or(0)
             }
-            GameState::Menu => 0,
+            GameState::Menu | GameState::MultiplayerMenu | GameState::AuthScreen | GameState::Lobby | GameState::Leaderboard => 0,
         }
     }
 
@@ -345,5 +484,22 @@ impl Game {
                 }
             }
         }
+    }
+
+    pub fn is_multiplayer(&self) -> bool {
+        self.multiplayer.is_some()
+    }
+
+    /// Count filled (non-given, non-empty) cells on the board
+    pub fn filled_count(&self) -> u32 {
+        let mut count = 0u32;
+        for r in 0..9 {
+            for c in 0..9 {
+                if matches!(self.board[r][c], Cell::UserInput(_)) {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 }
