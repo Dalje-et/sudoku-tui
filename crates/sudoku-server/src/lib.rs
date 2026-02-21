@@ -1,11 +1,11 @@
 #![allow(unused)]
 
-mod db;
-mod routes;
-mod state;
-mod ws;
+pub mod db;
+pub mod routes;
+pub mod state;
+pub mod ws;
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,12 +17,11 @@ use tower_http::cors::CorsLayer;
 
 use crate::state::{AppState, RoomState};
 
-#[tokio::main]
-async fn main() {
-    // Database setup.
+/// Build a fully configured Router + shared state.
+pub async fn build_app(db_url: &str) -> (Router, Arc<AppState>) {
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect("sqlite:sudoku.db?mode=rwc")
+        .connect(db_url)
         .await
         .expect("Failed to connect to SQLite");
 
@@ -40,7 +39,6 @@ async fn main() {
         max_connections: 100,
     });
 
-    // Spawn background cleanup task.
     {
         let state = state.clone();
         tokio::spawn(async move {
@@ -60,32 +58,11 @@ async fn main() {
         .route("/profile/{username}", get(routes::profile))
         .route("/ws", get(routes::ws_upgrade))
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(state.clone());
 
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let addr = format!("0.0.0.0:{}", port);
-
-    if std::env::var("GITHUB_CLIENT_ID").is_err() {
-        println!("╔══════════════════════════════════════════════════╗");
-        println!("║  SUDOKU SERVER — DEV MODE                       ║");
-        println!("║  GitHub OAuth disabled. Auto-creating dev users. ║");
-        println!("╚══════════════════════════════════════════════════╝");
-        println!();
-        println!("Run the client with:");
-        println!("  SUDOKU_SERVER_URL=ws://localhost:{} cargo run -p sudoku-tui", port);
-        println!();
-    }
-
-    println!("Listening on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .expect("Failed to bind");
-
-    axum::serve(listener, app).await.expect("Server error");
+    (app, state)
 }
 
-/// Background task: remove stale rooms and forfeit idle games.
 async fn cleanup(state: &AppState) {
     let now = Instant::now();
     let mut to_remove = Vec::new();
@@ -95,19 +72,16 @@ async fn cleanup(state: &AppState) {
         let room = entry.value();
         match room.state {
             RoomState::Waiting => {
-                // Remove rooms waiting longer than 10 minutes.
                 if now.duration_since(room.created_at) > Duration::from_secs(600) {
                     to_remove.push(room.code.clone());
                 }
             }
             RoomState::Playing => {
-                // Forfeit games idle longer than 5 minutes.
                 if now.duration_since(room.last_activity) > Duration::from_secs(300) {
                     to_forfeit.push((room.code.clone(), room.player1_id));
                 }
             }
             RoomState::Ended => {
-                // Clean up ended rooms after 2 minutes.
                 if now.duration_since(room.last_activity) > Duration::from_secs(120) {
                     to_remove.push(room.code.clone());
                 }
