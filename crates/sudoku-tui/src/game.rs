@@ -106,6 +106,8 @@ pub struct Game {
     pub room_input: String,
     // Joining mode active
     pub joining_room: bool,
+    // Error message to display (cleared on next action)
+    pub error_message: Option<String>,
     // Auth polling state
     pub auth_polling: bool,
     pub auth_poll_interval: u64,
@@ -144,6 +146,7 @@ impl Game {
             room_code: None,
             room_input: String::new(),
             joining_room: false,
+            error_message: None,
             auth_polling: false,
             auth_poll_interval: 5,
             leaderboard_entries: Vec::new(),

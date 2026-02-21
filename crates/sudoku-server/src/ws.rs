@@ -427,21 +427,14 @@ async fn handle_message(
                     return;
                 }
 
-                // Validate against solution.
-                if room.solution[row][col] != value {
-                    let _ = tx.send(ServerMessage::MoveRejected {
-                        row,
-                        col,
-                        reason: "Incorrect value".into(),
-                    });
-                    return;
-                }
+                // Accept any value 1-9 — correctness checked at game end.
 
                 match room.mode {
                     GameMode::Race => {
                         // Pre-read fields to avoid borrow conflicts.
                         let p1_id = room.player1_id;
                         let p2_id = room.player2_id;
+                        let solution = room.solution;
                         let duration = room
                             .started_at
                             .map(|s| s.elapsed().as_secs() as i64)
@@ -456,26 +449,38 @@ async fn handle_message(
                         let player_board = room.player_boards.get_mut(&user_id).unwrap();
                         player_board[row][col] = Cell::UserInput(value);
 
-                        let complete = is_board_complete(player_board);
+                        // Board is "complete" when all cells are filled (not necessarily correct).
+                        let all_filled = player_board.iter().all(|row| {
+                            row.iter().all(|cell| cell.value().is_some())
+                        });
                         let my_filled = filled_count(player_board);
+
+                        // Score = correct placements only.
+                        let my_correct = correct_count(player_board, &solution);
 
                         let opp_filled = opponent_id
                             .and_then(|oid| room.player_boards.get(&oid))
                             .map(|b| filled_count(b))
                             .unwrap_or(0);
+                        let opp_correct = opponent_id
+                            .and_then(|oid| room.player_boards.get(&oid))
+                            .map(|b| correct_count(b, &solution))
+                            .unwrap_or(0);
 
-                        if complete {
+                        if all_filled {
                             room.state = RoomState::Ended;
                         }
 
                         PlaceResult::Race {
-                            complete,
+                            complete: all_filled,
                             opponent_id,
                             duration,
                             p1_id,
                             p2_id,
                             my_filled,
                             opp_filled,
+                            my_correct,
+                            opp_correct,
                         }
                     }
                     GameMode::Shared => {
@@ -492,34 +497,39 @@ async fn handle_message(
                         room.shared_board[row][col] = Cell::UserInput(value);
                         room.cell_ownership.insert((row, col), user_id);
 
-                        let complete = is_board_complete(&room.shared_board);
+                        let solution = room.solution;
+                        // Board complete when all cells filled.
+                        let all_filled = room.shared_board.iter().all(|row| {
+                            row.iter().all(|cell| cell.value().is_some())
+                        });
                         let opponent_id = if room.player1_id == user_id {
                             room.player2_id
                         } else {
                             Some(room.player1_id)
                         };
 
-                        // Count cells per player for scoring.
-                        let my_score = room
-                            .cell_ownership
-                            .values()
-                            .filter(|&&id| id == user_id)
-                            .count() as u32;
+                        // Score = correct cells placed by each player.
+                        let my_score = count_correct_for_player(
+                            &room.cell_ownership,
+                            &room.shared_board,
+                            &solution,
+                            user_id,
+                        );
                         let opp_score = opponent_id
-                            .map(|oid| {
-                                room.cell_ownership
-                                    .values()
-                                    .filter(|&&id| id == oid)
-                                    .count() as u32
-                            })
+                            .map(|oid| count_correct_for_player(
+                                &room.cell_ownership,
+                                &room.shared_board,
+                                &solution,
+                                oid,
+                            ))
                             .unwrap_or(0);
 
-                        if complete {
+                        if all_filled {
                             room.state = RoomState::Ended;
                         }
 
                         PlaceResult::Shared {
-                            complete,
+                            complete: all_filled,
                             opponent_id,
                             my_score,
                             opp_score,
@@ -544,13 +554,22 @@ async fn handle_message(
                     duration,
                     p1_id,
                     p2_id,
-                    my_filled,
-                    opp_filled,
+                    my_filled: _,
+                    opp_filled: _,
+                    my_correct,
+                    opp_correct,
                 } => {
                     if complete {
-                        let loser_id = opponent_id.unwrap_or(user_id);
+                        // Winner = most correct cells. Tie goes to the finisher.
+                        let opp_id = opponent_id.unwrap_or(user_id);
+                        let (winner_id, loser_id, w_score, l_score) =
+                            if my_correct >= opp_correct {
+                                (user_id, opp_id, my_correct, opp_correct)
+                            } else {
+                                (opp_id, user_id, opp_correct, my_correct)
+                            };
                         end_game(
-                            state, &room_code, user_id, loser_id, my_filled, opp_filled,
+                            state, &room_code, winner_id, loser_id, w_score, l_score,
                             duration, p1_id, p2_id,
                         )
                         .await;
@@ -791,6 +810,8 @@ enum PlaceResult {
         p2_id: Option<i64>,
         my_filled: u32,
         opp_filled: u32,
+        my_correct: u32,
+        opp_correct: u32,
     },
     Shared {
         complete: bool,
@@ -801,6 +822,26 @@ enum PlaceResult {
         p1_id: i64,
         p2_id: Option<i64>,
     },
+}
+
+/// Count correct cells placed by a specific player on the shared board.
+fn count_correct_for_player(
+    ownership: &HashMap<(usize, usize), i64>,
+    board: &Board,
+    solution: &[[u8; 9]; 9],
+    player_id: i64,
+) -> u32 {
+    let mut count = 0u32;
+    for ((r, c), owner) in ownership.iter() {
+        if *owner == player_id {
+            if let Some(v) = board[*r][*c].value() {
+                if v == solution[*r][*c] {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
 }
 
 fn send_to(state: &AppState, user_id: i64, msg: ServerMessage) {

@@ -184,8 +184,10 @@ fn handle_server_message(game: &mut Game, msg: ServerMessage) {
             game.start_multiplayer_game(board, solution, mode, opponent_name, opponent_rating);
         }
         ServerMessage::MoveAccepted { .. } => {}
-        ServerMessage::MoveRejected { row, col, .. } => {
+        ServerMessage::MoveRejected { row, col, reason } => {
+            // Revert the local placement
             game.board[row][col] = Cell::Empty;
+            game.error_message = Some(reason);
         }
         ServerMessage::OpponentProgress {
             filled_count,
@@ -237,7 +239,7 @@ fn handle_server_message(game: &mut Game, msg: ServerMessage) {
         ServerMessage::OpponentDisconnected => {}
         ServerMessage::OpponentReconnected => {}
         ServerMessage::Error { message } => {
-            game.auth_status = Some(format!("Error: {}", message));
+            game.error_message = Some(message);
         }
         ServerMessage::Pong => {}
     }
@@ -362,6 +364,9 @@ async fn handle_multiplayer_menu_key(
     username: &mut Option<String>,
     saved_token: &mut Option<String>,
 ) -> bool {
+    // Clear error on any key press
+    game.error_message = None;
+
     if game.joining_room {
         match key.code {
             KeyCode::Char(c) if c.is_ascii_alphanumeric() && game.room_input.len() < 6 => {

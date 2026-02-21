@@ -112,13 +112,28 @@ pub fn board_to_wire(board: &Board) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Count filled (non-empty) cells in a board.
+/// Count user-placed (non-given, non-empty) cells in a board.
 pub fn filled_count(board: &Board) -> u32 {
     let mut count = 0u32;
     for row in board.iter() {
         for cell in row.iter() {
-            if cell.value().is_some() {
+            if matches!(cell, Cell::UserInput(_)) {
                 count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Count user-placed cells that match the solution.
+pub fn correct_count(board: &Board, solution: &[[u8; 9]; 9]) -> u32 {
+    let mut count = 0u32;
+    for r in 0..9 {
+        for c in 0..9 {
+            if let Cell::UserInput(v) = board[r][c] {
+                if v == solution[r][c] {
+                    count += 1;
+                }
             }
         }
     }

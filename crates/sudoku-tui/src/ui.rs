@@ -207,6 +207,21 @@ fn draw_multiplayer_menu(f: &mut Frame, game: &Game) {
 
     let paragraph = Paragraph::new(lines).block(block).alignment(Alignment::Left);
     f.render_widget(paragraph, popup);
+
+    // Show error message if present
+    if let Some(ref err) = game.error_message {
+        let err_area = Rect {
+            x: popup.x,
+            y: popup.y + popup.height,
+            width: popup.width,
+            height: 1,
+        };
+        let err_line = Paragraph::new(Line::from(Span::styled(
+            format!(" Error: {}", err),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        f.render_widget(err_line, err_area);
+    }
 }
 
 // ── Auth screen ──────────────────────────────────────────────────────────────
