@@ -94,9 +94,13 @@ Hints, validation, undo, and pause are disabled in multiplayer.
 
 ## Multiplayer
 
-### Quick Start (Local Dev)
+### Play Online
 
-No credentials needed — the server auto-creates dev users when GitHub OAuth isn't configured.
+The multiplayer server is live — just press `m` in the main menu. You'll be asked to log in with your GitHub account via device flow (go to a URL, enter a code). After that, create a room, join one, or quick match.
+
+### Local Development
+
+For local testing without GitHub OAuth, run the server yourself — it auto-creates dev users when credentials aren't configured.
 
 **Terminal 1 — Server:**
 ```bash
@@ -138,7 +142,8 @@ Three crates in a Cargo workspace:
 | `PORT` | Server listen port | `8080` |
 | `GITHUB_CLIENT_ID` | GitHub OAuth app client ID | _(dev mode if unset)_ |
 | `GITHUB_CLIENT_SECRET` | GitHub OAuth app secret | _(dev mode if unset)_ |
-| `SUDOKU_SERVER_URL` | Client: server WebSocket URL | `wss://sudoku-tui-server.shuttleapp.rs` |
+| `DATABASE_URL` | Server: SQLite connection string | `sqlite:sudoku.db?mode=rwc` |
+| `SUDOKU_SERVER_URL` | Client: server WebSocket URL | `wss://sudoku-tui-server.onrender.com` |
 
 ### Cost Safety
 
