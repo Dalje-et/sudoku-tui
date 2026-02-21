@@ -7,7 +7,7 @@ use sudoku_core::protocol::{
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-const DEFAULT_SERVER_URL: &str = "wss://sudoku-tui-server.fly.dev";
+const DEFAULT_SERVER_URL: &str = "wss://sudoku-tui-server.onrender.com";
 
 fn server_url() -> String {
     std::env::var("SUDOKU_SERVER_URL").unwrap_or_else(|_| DEFAULT_SERVER_URL.to_string())

@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: sudoku-tui-server
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: DATABASE_URL
+        value: "sqlite:sudoku.db?mode=rwc"
