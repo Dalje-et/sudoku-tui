@@ -15,3 +15,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rustls = "0.23"
+webpki-roots = "1"

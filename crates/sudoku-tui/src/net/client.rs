@@ -1,5 +1,6 @@
 use futures_util::{SinkExt, StreamExt};
 use std::path::PathBuf;
+use std::sync::Arc;
 use sudoku_core::protocol::{
     AuthPollResponse, ClientMessage, DeviceAuthResponse, LeaderboardEntry, PlayerProfile,
     ServerMessage,
@@ -47,7 +48,30 @@ impl NetworkClient {
     /// Connect to the server via WebSocket with the given auth token
     pub async fn connect(token: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/ws?token={}", server_url(), token);
-        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await?;
+
+        // Build a rustls config that only advertises HTTP/1.1 in ALPN.
+        // Cloudflare/Render negotiate HTTP/2 by default, which breaks
+        // WebSocket upgrade (requires HTTP/1.1).
+        let connector = if url.starts_with("wss://") {
+            let roots = rustls::RootCertStore::from_iter(
+                webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+            );
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            // config.alpn_protocols is empty by default = no ALPN = HTTP/1.1
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
+        } else {
+            None
+        };
+
+        let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+            &url,
+            None,
+            false,
+            connector,
+        )
+        .await?;
         let (mut ws_sink, mut ws_stream_rx) = ws_stream.split();
 
         let (client_tx, mut client_rx) = mpsc::unbounded_channel::<ClientMessage>();
