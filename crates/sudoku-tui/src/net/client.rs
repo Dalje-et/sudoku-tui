@@ -9,13 +9,45 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_SERVER_URL: &str = "wss://sudoku-tui-server.onrender.com";
+const LOCAL_SERVER_URL: &str = "ws://localhost:8080";
 
-pub fn is_local() -> bool {
-    is_local_server()
+use std::sync::OnceLock;
+
+static RESOLVED_URL: OnceLock<String> = OnceLock::new();
+
+/// Resolve the server URL once on first call.
+/// Priority: SUDOKU_SERVER_URL env var > local server if running > production.
+fn server_url() -> String {
+    RESOLVED_URL
+        .get_or_init(|| {
+            // Explicit env var always wins
+            if let Ok(url) = std::env::var("SUDOKU_SERVER_URL") {
+                return url;
+            }
+            // Check if a local server is running
+            if check_local_server() {
+                return LOCAL_SERVER_URL.to_string();
+            }
+            // Fall back to production
+            DEFAULT_SERVER_URL.to_string()
+        })
+        .clone()
 }
 
-fn server_url() -> String {
-    std::env::var("SUDOKU_SERVER_URL").unwrap_or_else(|_| DEFAULT_SERVER_URL.to_string())
+/// Quick non-async check if localhost:8080 is responding.
+fn check_local_server() -> bool {
+    use std::net::TcpStream;
+    use std::time::Duration;
+    TcpStream::connect_timeout(
+        &"127.0.0.1:8080".parse().unwrap(),
+        Duration::from_millis(100),
+    )
+    .is_ok()
+}
+
+pub fn is_local() -> bool {
+    let url = server_url();
+    url.contains("localhost") || url.contains("127.0.0.1")
 }
 
 fn http_base_url() -> String {
