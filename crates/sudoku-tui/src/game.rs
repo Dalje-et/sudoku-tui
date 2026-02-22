@@ -260,7 +260,7 @@ impl Game {
             }
         }
 
-        if self.pencil_mode && self.state == GameState::Playing {
+        if self.pencil_mode && (self.state == GameState::Playing || self.state == GameState::MultiplayerPlaying) {
             self.toggle_pencil_mark(num);
             return;
         }

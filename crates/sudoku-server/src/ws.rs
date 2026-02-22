@@ -554,16 +554,18 @@ async fn handle_message(
                     duration,
                     p1_id,
                     p2_id,
-                    my_filled: _,
+                    my_filled,
                     opp_filled: _,
                     my_correct,
                     opp_correct,
                 } => {
                     if complete {
-                        // Winner = most correct cells. Tie goes to the finisher.
                         let opp_id = opponent_id.unwrap_or(user_id);
+                        // You only win if majority of your placements are correct.
+                        // Filling with garbage = you lose.
+                        let finisher_good = my_correct > my_filled / 2;
                         let (winner_id, loser_id, w_score, l_score) =
-                            if my_correct >= opp_correct {
+                            if finisher_good && my_correct >= opp_correct {
                                 (user_id, opp_id, my_correct, opp_correct)
                             } else {
                                 (opp_id, user_id, opp_correct, my_correct)
