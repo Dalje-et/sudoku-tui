@@ -470,7 +470,7 @@ fn draw_multiplayer_playing(f: &mut Frame, game: &Game) {
         draw_shared_panel(f, game, panel_v[1]);
     }
 
-    draw_multiplayer_key_hints(f, bottom_area);
+    draw_multiplayer_key_hints(f, game, bottom_area);
 }
 
 // ── Race mode panel ─────────────────────────────────────────────────────────
@@ -1321,8 +1321,21 @@ fn draw_key_hints(f: &mut Frame, area: Rect) {
     f.render_widget(bar, area);
 }
 
-fn draw_multiplayer_key_hints(f: &mut Frame, area: Rect) {
+fn draw_multiplayer_key_hints(f: &mut Frame, game: &Game, area: Rect) {
+    let pencil_span = if game.pencil_mode {
+        Span::styled(
+            " PENCIL ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("", Style::default())
+    };
+
     let hints = Line::from(vec![
+        pencil_span,
         Span::styled(" ←↑↓→", Style::default().fg(Color::Yellow)),
         Span::styled(" Move  ", Style::default().fg(Color::Gray)),
         Span::styled("1-9", Style::default().fg(Color::Yellow)),

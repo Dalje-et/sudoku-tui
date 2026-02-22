@@ -390,3 +390,44 @@ async fn test_shared_mode_first_write_wins() {
     let rejected = ws_recv_type(&mut stream2, "MoveRejected").await;
     assert!(rejected["reason"].as_str().unwrap().contains("claimed"));
 }
+
+#[tokio::test]
+async fn test_race_game_ends_when_board_full_even_with_wrong_numbers() {
+    let base = start_server().await;
+
+    let (t1, _) = dev_auth(&base).await;
+    let (t2, _) = dev_auth(&base).await;
+
+    let (mut sink1, mut stream1) = ws_connect(&base, &t1).await;
+    let (mut sink2, mut stream2) = ws_connect(&base, &t2).await;
+
+    ws_send(&mut sink1, json!({"type": "QuickMatch", "mode": "Race", "difficulty": "Easy"})).await;
+    let _ = ws_recv_type(&mut stream1, "WaitingForOpponent").await;
+    ws_send(&mut sink2, json!({"type": "QuickMatch", "mode": "Race", "difficulty": "Easy"})).await;
+
+    let p1_match = ws_recv_type(&mut stream1, "MatchStarted").await;
+    let board: Vec<Vec<u8>> = serde_json::from_value(p1_match["board"].clone()).unwrap();
+    let _ = ws_recv_type(&mut stream2, "MatchStarted").await;
+
+    // P1 fills every empty cell with value 1 (mostly wrong)
+    let empty_cells: Vec<(usize, usize)> = (0..9)
+        .flat_map(|r| (0..9).map(move |c| (r, c)))
+        .filter(|(r, c)| board[*r][*c] == 0)
+        .collect();
+
+    assert!(!empty_cells.is_empty());
+
+    for (r, c) in &empty_cells {
+        ws_send(&mut sink1, json!({"type": "PlaceNumber", "row": r, "col": c, "value": 1})).await;
+        // Small delay to avoid rate limiting (20 msg/s)
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let msg = ws_recv_type(&mut stream1, "MoveAccepted").await;
+        assert_eq!(msg["type"].as_str().unwrap(), "MoveAccepted");
+    }
+
+    // Game should end after the last cell is filled
+    let end1 = ws_recv_type(&mut stream1, "GameEnd").await;
+    assert_eq!(end1["type"].as_str().unwrap(), "GameEnd");
+    // Score should reflect correct count (likely very low since we used all 1s)
+    assert!(end1["your_score"].as_u64().unwrap() < empty_cells.len() as u64);
+}
