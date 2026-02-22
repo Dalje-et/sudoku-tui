@@ -40,7 +40,6 @@ async fn async_run() -> Result<(), Box<dyn std::error::Error>> {
     let mut username: Option<String> = None;
     let mut saved_token: Option<String> = None;
 
-    // Check for saved auth
     if let Some((token, name)) = NetworkClient::load_token() {
         username = Some(name);
         saved_token = Some(token);
@@ -71,12 +70,82 @@ async fn run_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut event_stream = EventStream::new();
     let tick_rate = Duration::from_millis(250);
-
-    // Auth polling timer — only active when game.auth_polling is true
     let mut auth_poll_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
 
     loop {
         terminal.draw(|f| ui::draw(f, game))?;
+
+        // Check for pending async operations BEFORE select — these are non-blocking flags
+        // set by key handlers that we execute here to avoid freezing the UI.
+        if game.pending_auth_start {
+            game.pending_auth_start = false;
+            game.state = GameState::AuthScreen;
+            game.auth_status = Some("Connecting to server...".to_string());
+            // Re-render immediately to show the status
+            terminal.draw(|f| ui::draw(f, game))?;
+
+            match NetworkClient::start_device_auth().await {
+                Ok(resp) => {
+                    game.auth_code = Some(resp.user_code);
+                    game.auth_uri = Some(resp.verification_uri);
+                    game.auth_poll_interval = resp.interval.max(5);
+                    game.auth_polling = true;
+                    auth_poll_deadline = tokio::time::Instant::now()
+                        + Duration::from_secs(game.auth_poll_interval);
+                    game.auth_status =
+                        Some("Please enter the code shown below at the URL".to_string());
+                }
+                Err(e) => {
+                    game.auth_status = Some(format!("Auth failed: {}", e));
+                    game.auth_polling = false;
+                }
+            }
+            continue;
+        }
+
+        if game.pending_connect {
+            game.pending_connect = false;
+            game.auth_status = Some("Connecting...".to_string());
+            terminal.draw(|f| ui::draw(f, game))?;
+
+            if let Some(token) = saved_token.as_ref() {
+                match NetworkClient::connect(token).await {
+                    Ok(client) => {
+                        *net_client = Some(client);
+                        game.auth_status = None;
+                        // Now execute the pending menu action
+                        if let Some(action) = game.pending_menu_action.take() {
+                            execute_menu_action(game, action, net_client);
+                        }
+                    }
+                    Err(e) => {
+                        game.error_message = Some(format!("Connection failed: {}", e));
+                        game.pending_menu_action = None;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if game.pending_leaderboard {
+            game.pending_leaderboard = false;
+            game.auth_status = Some("Loading leaderboard...".to_string());
+            terminal.draw(|f| ui::draw(f, game))?;
+
+            match NetworkClient::fetch_leaderboard().await {
+                Ok(entries) => {
+                    game.leaderboard_entries = entries;
+                    game.leaderboard_scroll = 0;
+                    game.state = GameState::Leaderboard;
+                    game.auth_status = None;
+                }
+                Err(e) => {
+                    game.error_message = Some(format!("Failed to load: {}", e));
+                    game.auth_status = None;
+                }
+            }
+            continue;
+        }
 
         tokio::select! {
             maybe_event = event_stream.next() => {
@@ -84,7 +153,7 @@ async fn run_loop(
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
-                    if handle_key(game, key, net_client, username, saved_token).await {
+                    if handle_key(game, key, net_client, username, saved_token) {
                         return Ok(());
                     }
                 }
@@ -94,12 +163,10 @@ async fn run_loop(
                     handle_server_message(game, msg);
                 }
             }
-            // Auth polling: poll GitHub for device flow completion
             _ = tokio::time::sleep_until(auth_poll_deadline), if game.auth_polling => {
                 if let Some(code) = game.auth_code.clone() {
                     match NetworkClient::poll_auth(&code).await {
                         Ok(AuthPollResponse::Complete { token, username: name }) => {
-                            // Auth succeeded — save token, connect WebSocket
                             let _ = NetworkClient::save_token(&token, &name);
                             *username = Some(name.clone());
                             *saved_token = Some(token.clone());
@@ -107,7 +174,6 @@ async fn run_loop(
                             game.auth_code = None;
                             game.auth_uri = None;
 
-                            // Connect to server
                             match NetworkClient::connect(&token).await {
                                 Ok(client) => {
                                     *net_client = Some(client);
@@ -121,7 +187,6 @@ async fn run_loop(
                             }
                         }
                         Ok(AuthPollResponse::Pending) => {
-                            // Still waiting — poll again after interval
                             auth_poll_deadline = tokio::time::Instant::now()
                                 + Duration::from_secs(game.auth_poll_interval);
                         }
@@ -130,7 +195,6 @@ async fn run_loop(
                             game.auth_status = Some("Auth code expired. Try again.".to_string());
                         }
                         Err(e) => {
-                            // Network error — retry after interval
                             game.auth_status = Some(format!("Poll error: {}", e));
                             auth_poll_deadline = tokio::time::Instant::now()
                                 + Duration::from_secs(game.auth_poll_interval);
@@ -185,7 +249,6 @@ fn handle_server_message(game: &mut Game, msg: ServerMessage) {
         }
         ServerMessage::MoveAccepted { .. } => {}
         ServerMessage::MoveRejected { row, col, reason } => {
-            // Revert the local placement
             game.board[row][col] = Cell::Empty;
             game.error_message = Some(reason);
         }
@@ -245,7 +308,8 @@ fn handle_server_message(game: &mut Game, msg: ServerMessage) {
     }
 }
 
-async fn handle_key(
+// handle_key is now sync — all async work is deferred via pending_* flags
+fn handle_key(
     game: &mut Game,
     key: KeyEvent,
     net_client: &mut Option<NetworkClient>,
@@ -258,7 +322,7 @@ async fn handle_key(
         GameState::Paused => handle_paused_key(game, key),
         GameState::Won => handle_won_key(game, key),
         GameState::MultiplayerMenu => {
-            handle_multiplayer_menu_key(game, key, net_client, username, saved_token).await
+            handle_multiplayer_menu_key(game, key, net_client, username, saved_token)
         }
         GameState::AuthScreen => handle_auth_key(game, key),
         GameState::Lobby => handle_lobby_key(game, key),
@@ -357,14 +421,13 @@ const MP_MENU_ITEMS: &[&str] = &[
     "Back",
 ];
 
-async fn handle_multiplayer_menu_key(
+fn handle_multiplayer_menu_key(
     game: &mut Game,
     key: KeyEvent,
     net_client: &mut Option<NetworkClient>,
     username: &mut Option<String>,
     saved_token: &mut Option<String>,
 ) -> bool {
-    // Clear error on any key press
     game.error_message = None;
 
     if game.joining_room {
@@ -404,73 +467,20 @@ async fn handle_multiplayer_menu_key(
             game.menu_selection = (game.menu_selection + 1) % MP_MENU_ITEMS.len();
         }
         KeyCode::Enter => {
-            // Items 0-3 require auth. If not authed, start device flow.
+            // Items 0-3 require auth
             if game.menu_selection < 4 && username.is_none() {
-                start_auth_flow(game).await;
+                game.pending_auth_start = true;
                 return false;
             }
 
-            // If authed but not connected, connect now.
-            if game.menu_selection < 4 && net_client.is_none() {
-                if let Some(token) = saved_token.as_ref() {
-                    match NetworkClient::connect(token).await {
-                        Ok(client) => {
-                            *net_client = Some(client);
-                        }
-                        Err(e) => {
-                            game.auth_status = Some(format!("Connection failed: {}", e));
-                            return false;
-                        }
-                    }
-                }
+            // If authed but not connected, defer connection
+            if game.menu_selection < 4 && net_client.is_none() && saved_token.is_some() {
+                game.pending_connect = true;
+                game.pending_menu_action = Some(game.menu_selection);
+                return false;
             }
 
-            match game.menu_selection {
-                0 => {
-                    // Create Room
-                    if let Some(client) = net_client.as_ref() {
-                        client.send(ClientMessage::CreateRoom {
-                            mode: GameMode::Race,
-                            difficulty: game.difficulty,
-                        });
-                    }
-                }
-                1 => {
-                    // Join Room
-                    game.joining_room = true;
-                    game.room_input.clear();
-                }
-                2 => {
-                    // Quick Match
-                    if let Some(client) = net_client.as_ref() {
-                        client.send(ClientMessage::QuickMatch {
-                            mode: GameMode::Race,
-                            difficulty: game.difficulty,
-                        });
-                    }
-                    game.state = GameState::Lobby;
-                    game.room_code = None;
-                }
-                3 => {
-                    // Leaderboard — fetch async then show
-                    game.auth_status = Some("Loading leaderboard...".to_string());
-                    match NetworkClient::fetch_leaderboard().await {
-                        Ok(entries) => {
-                            game.leaderboard_entries = entries;
-                            game.leaderboard_scroll = 0;
-                            game.state = GameState::Leaderboard;
-                        }
-                        Err(e) => {
-                            game.auth_status = Some(format!("Failed to load: {}", e));
-                        }
-                    }
-                }
-                4 => {
-                    // Back
-                    game.state = GameState::Menu;
-                }
-                _ => {}
-            }
+            execute_menu_action(game, game.menu_selection, net_client);
         }
         KeyCode::Esc | KeyCode::Char('q') => {
             game.state = GameState::Menu;
@@ -480,22 +490,47 @@ async fn handle_multiplayer_menu_key(
     false
 }
 
-async fn start_auth_flow(game: &mut Game) {
-    game.state = GameState::AuthScreen;
-    game.auth_status = Some("Starting GitHub authentication...".to_string());
-    match NetworkClient::start_device_auth().await {
-        Ok(resp) => {
-            game.auth_code = Some(resp.user_code);
-            game.auth_uri = Some(resp.verification_uri);
-            game.auth_poll_interval = resp.interval.max(5);
-            game.auth_polling = true;
-            game.auth_status =
-                Some("Please enter the code shown below at the URL".to_string());
+/// Execute a multiplayer menu action (called after auth + connect are ready)
+fn execute_menu_action(
+    game: &mut Game,
+    action: usize,
+    net_client: &mut Option<NetworkClient>,
+) {
+    match action {
+        0 => {
+            // Create Room
+            if let Some(client) = net_client.as_ref() {
+                client.send(ClientMessage::CreateRoom {
+                    mode: GameMode::Race,
+                    difficulty: game.difficulty,
+                });
+            }
         }
-        Err(e) => {
-            game.auth_status = Some(format!("Auth failed: {}", e));
-            game.auth_polling = false;
+        1 => {
+            // Join Room
+            game.joining_room = true;
+            game.room_input.clear();
         }
+        2 => {
+            // Quick Match
+            if let Some(client) = net_client.as_ref() {
+                client.send(ClientMessage::QuickMatch {
+                    mode: GameMode::Race,
+                    difficulty: game.difficulty,
+                });
+            }
+            game.state = GameState::Lobby;
+            game.room_code = None;
+        }
+        3 => {
+            // Leaderboard — defer to async
+            game.pending_leaderboard = true;
+        }
+        4 => {
+            // Back
+            game.state = GameState::Menu;
+        }
+        _ => {}
     }
 }
 

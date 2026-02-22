@@ -111,6 +111,12 @@ pub struct Game {
     // Auth polling state
     pub auth_polling: bool,
     pub auth_poll_interval: u64,
+    // Pending async operations (triggered by key press, executed in event loop)
+    pub pending_auth_start: bool,
+    pub pending_connect: bool,
+    pub pending_leaderboard: bool,
+    // What menu action to resume after connecting
+    pub pending_menu_action: Option<usize>,
     // Leaderboard
     pub leaderboard_entries: Vec<LeaderboardEntry>,
     pub leaderboard_scroll: usize,
@@ -149,6 +155,10 @@ impl Game {
             error_message: None,
             auth_polling: false,
             auth_poll_interval: 5,
+            pending_auth_start: false,
+            pending_connect: false,
+            pending_leaderboard: false,
+            pending_menu_action: None,
             leaderboard_entries: Vec::new(),
             leaderboard_scroll: 0,
         }
