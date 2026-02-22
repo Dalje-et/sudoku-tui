@@ -17,6 +17,9 @@ use sudoku_core::protocol::{AuthPollResponse, ClientMessage, GameMode, ServerMes
 use sudoku_core::Cell;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Install rustls crypto provider before any TLS usage
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async_run())
 }
@@ -108,12 +111,13 @@ async fn run_loop(
             game.auth_status = Some("Connecting...".to_string());
             terminal.draw(|f| ui::draw(f, game))?;
 
-            if let Some(token) = saved_token.as_ref() {
-                match NetworkClient::connect(token).await {
-                    Ok(client) => {
+            if crate::net::client::is_local() && saved_token.is_none() {
+                // Dev mode: auth + connect in one shot
+                match NetworkClient::dev_auth_and_connect().await {
+                    Ok((client, name)) => {
+                        *username = Some(name);
                         *net_client = Some(client);
                         game.auth_status = None;
-                        // Now execute the pending menu action
                         if let Some(action) = game.pending_menu_action.take() {
                             execute_menu_action(game, action, net_client);
                         }
@@ -121,6 +125,22 @@ async fn run_loop(
                     Err(e) => {
                         game.error_message = Some(format!("Connection failed: {}", e));
                         game.pending_menu_action = None;
+                        game.auth_status = None;
+                    }
+                }
+            } else if let Some(token) = saved_token.as_ref() {
+                match NetworkClient::connect(token).await {
+                    Ok(client) => {
+                        *net_client = Some(client);
+                        game.auth_status = None;
+                        if let Some(action) = game.pending_menu_action.take() {
+                            execute_menu_action(game, action, net_client);
+                        }
+                    }
+                    Err(e) => {
+                        game.error_message = Some(format!("Connection failed: {}", e));
+                        game.pending_menu_action = None;
+                        game.auth_status = None;
                     }
                 }
             }
@@ -467,16 +487,20 @@ fn handle_multiplayer_menu_key(
             game.menu_selection = (game.menu_selection + 1) % MP_MENU_ITEMS.len();
         }
         KeyCode::Enter => {
-            // Items 0-3 require auth
-            if game.menu_selection < 4 && username.is_none() {
-                game.pending_auth_start = true;
-                return false;
-            }
-
-            // If authed but not connected, defer connection
-            if game.menu_selection < 4 && net_client.is_none() && saved_token.is_some() {
-                game.pending_connect = true;
-                game.pending_menu_action = Some(game.menu_selection);
+            // Items 0-3 require auth + connection
+            if game.menu_selection < 4 && net_client.is_none() {
+                if crate::net::client::is_local() {
+                    // Dev mode: silent auto-auth+connect
+                    game.pending_connect = true;
+                    game.pending_menu_action = Some(game.menu_selection);
+                } else if username.is_none() {
+                    // Production: GitHub device flow
+                    game.pending_auth_start = true;
+                } else if saved_token.is_some() {
+                    // Already authed, just need to connect
+                    game.pending_connect = true;
+                    game.pending_menu_action = Some(game.menu_selection);
+                }
                 return false;
             }
 

@@ -10,6 +10,10 @@ use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_SERVER_URL: &str = "wss://sudoku-tui-server.onrender.com";
 
+pub fn is_local() -> bool {
+    is_local_server()
+}
+
 fn server_url() -> String {
     std::env::var("SUDOKU_SERVER_URL").unwrap_or_else(|_| DEFAULT_SERVER_URL.to_string())
 }
@@ -112,6 +116,21 @@ impl NetworkClient {
 
     pub fn send(&self, msg: ClientMessage) {
         let _ = self.sender.send(msg);
+    }
+
+    /// Dev mode: authenticate and connect in one shot (no user interaction).
+    /// Returns (client, username).
+    pub async fn dev_auth_and_connect(
+    ) -> Result<(Self, String), Box<dyn std::error::Error + Send + Sync>> {
+        let resp = Self::start_device_auth().await?;
+        let poll = Self::poll_auth(&resp.user_code).await?;
+        match poll {
+            AuthPollResponse::Complete { token, username } => {
+                let client = Self::connect(&token).await?;
+                Ok((client, username))
+            }
+            _ => Err("Dev auth failed".into()),
+        }
     }
 
     /// Start the GitHub device auth flow
