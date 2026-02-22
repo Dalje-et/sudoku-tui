@@ -74,6 +74,10 @@ pub enum ServerMessage {
         col: usize,
         reason: String,
     },
+    /// Board is full but has incorrect cells — keep playing
+    BoardIncomplete {
+        wrong_cells: u32,
+    },
     /// Race mode: opponent's progress (bitmap of filled cells + momentum)
     OpponentProgress {
         filled_count: u32,

@@ -425,11 +425,7 @@ async fn test_race_game_ends_when_board_full_even_with_wrong_numbers() {
         assert_eq!(msg["type"].as_str().unwrap(), "MoveAccepted");
     }
 
-    // Game should end after the last cell is filled
-    let end1 = ws_recv_type(&mut stream1, "GameEnd").await;
-    assert_eq!(end1["type"].as_str().unwrap(), "GameEnd");
-    // Filling with all 1s = mostly wrong = you lose
-    assert_eq!(end1["won"].as_bool().unwrap(), false);
-    // Score should be very low
-    assert!(end1["your_score"].as_u64().unwrap() < empty_cells.len() as u64);
+    // Board is full but mostly wrong — should get BoardIncomplete, NOT GameEnd
+    let incomplete = ws_recv_type(&mut stream1, "BoardIncomplete").await;
+    assert!(incomplete["wrong_cells"].as_u64().unwrap() > 0);
 }

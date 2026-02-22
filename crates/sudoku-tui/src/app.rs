@@ -319,6 +319,9 @@ fn handle_server_message(game: &mut Game, msg: ServerMessage) {
             }
             game.state = GameState::MultiplayerEnd;
         }
+        ServerMessage::BoardIncomplete { wrong_cells } => {
+            game.error_message = Some(format!("{} cells are incorrect — fix them!", wrong_cells));
+        }
         ServerMessage::OpponentDisconnected => {}
         ServerMessage::OpponentReconnected => {}
         ServerMessage::Error { message } => {
@@ -619,6 +622,8 @@ fn handle_multiplayer_playing_key(
         }
         return false;
     }
+
+    game.error_message = None;
 
     match key.code {
         KeyCode::Up => {

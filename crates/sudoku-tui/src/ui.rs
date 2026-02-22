@@ -1322,6 +1322,19 @@ fn draw_key_hints(f: &mut Frame, area: Rect) {
 }
 
 fn draw_multiplayer_key_hints(f: &mut Frame, game: &Game, area: Rect) {
+    // If there's an error message, show it instead of key hints
+    if let Some(ref err) = game.error_message {
+        let bar = Paragraph::new(Line::from(Span::styled(
+            format!(" {} ", err),
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )));
+        f.render_widget(bar, area);
+        return;
+    }
+
     let pencil_span = if game.pencil_mode {
         Span::styled(
             " PENCIL ",

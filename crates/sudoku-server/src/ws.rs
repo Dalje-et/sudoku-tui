@@ -449,14 +449,13 @@ async fn handle_message(
                         let player_board = room.player_boards.get_mut(&user_id).unwrap();
                         player_board[row][col] = Cell::UserInput(value);
 
-                        // Board is "complete" when all cells are filled (not necessarily correct).
                         let all_filled = player_board.iter().all(|row| {
                             row.iter().all(|cell| cell.value().is_some())
                         });
                         let my_filled = filled_count(player_board);
-
-                        // Score = correct placements only.
                         let my_correct = correct_count(player_board, &solution);
+                        // All correct = game over. All filled but some wrong = notify player.
+                        let all_correct = all_filled && my_correct == my_filled;
 
                         let opp_filled = opponent_id
                             .and_then(|oid| room.player_boards.get(&oid))
@@ -467,12 +466,14 @@ async fn handle_message(
                             .map(|b| correct_count(b, &solution))
                             .unwrap_or(0);
 
-                        if all_filled {
+                        if all_correct {
                             room.state = RoomState::Ended;
                         }
 
                         PlaceResult::Race {
-                            complete: all_filled,
+                            complete: all_correct,
+                            all_filled,
+                            wrong_cells: if all_filled { my_filled - my_correct } else { 0 },
                             opponent_id,
                             duration,
                             p1_id,
@@ -498,17 +499,16 @@ async fn handle_message(
                         room.cell_ownership.insert((row, col), user_id);
 
                         let solution = room.solution;
-                        // Board complete when all cells filled.
                         let all_filled = room.shared_board.iter().all(|row| {
                             row.iter().all(|cell| cell.value().is_some())
                         });
+                        let all_correct = all_filled && is_board_complete(&room.shared_board);
                         let opponent_id = if room.player1_id == user_id {
                             room.player2_id
                         } else {
                             Some(room.player1_id)
                         };
 
-                        // Score = correct cells placed by each player.
                         let my_score = count_correct_for_player(
                             &room.cell_ownership,
                             &room.shared_board,
@@ -524,12 +524,18 @@ async fn handle_message(
                             ))
                             .unwrap_or(0);
 
-                        if all_filled {
+                        let total_user_cells: u32 = room.cell_ownership.len() as u32;
+                        let total_correct = my_score + opp_score;
+                        let wrong_cells = if all_filled { total_user_cells - total_correct } else { 0 };
+
+                        if all_correct {
                             room.state = RoomState::Ended;
                         }
 
                         PlaceResult::Shared {
-                            complete: all_filled,
+                            complete: all_correct,
+                            all_filled,
+                            wrong_cells,
                             opponent_id,
                             my_score,
                             opp_score,
@@ -550,35 +556,34 @@ async fn handle_message(
             match result {
                 PlaceResult::Race {
                     complete,
+                    all_filled,
+                    wrong_cells,
                     opponent_id,
                     duration,
                     p1_id,
                     p2_id,
-                    my_filled,
+                    my_filled: _,
                     opp_filled: _,
                     my_correct,
                     opp_correct,
                 } => {
                     if complete {
+                        // All cells correct — this player wins
                         let opp_id = opponent_id.unwrap_or(user_id);
-                        // You only win if majority of your placements are correct.
-                        // Filling with garbage = you lose.
-                        let finisher_good = my_correct > my_filled / 2;
-                        let (winner_id, loser_id, w_score, l_score) =
-                            if finisher_good && my_correct >= opp_correct {
-                                (user_id, opp_id, my_correct, opp_correct)
-                            } else {
-                                (opp_id, user_id, opp_correct, my_correct)
-                            };
                         end_game(
-                            state, &room_code, winner_id, loser_id, w_score, l_score,
+                            state, &room_code, user_id, opp_id, my_correct, opp_correct,
                             duration, p1_id, p2_id,
                         )
                         .await;
+                    } else if all_filled && wrong_cells > 0 {
+                        // Board full but has wrong cells — notify player
+                        let _ = tx.send(ServerMessage::BoardIncomplete { wrong_cells });
                     }
                 }
                 PlaceResult::Shared {
                     complete,
+                    all_filled,
+                    wrong_cells,
                     opponent_id,
                     my_score,
                     opp_score,
@@ -592,7 +597,6 @@ async fn handle_message(
                     }
 
                     if complete {
-                        // Winner is the player with more cells.
                         let (winner_id, loser_id, w_score, l_score) = if my_score >= opp_score {
                             (user_id, opponent_id.unwrap_or(user_id), my_score, opp_score)
                         } else {
@@ -608,6 +612,8 @@ async fn handle_message(
                             p1_id, p2_id,
                         )
                         .await;
+                    } else if all_filled && wrong_cells > 0 {
+                        let _ = tx.send(ServerMessage::BoardIncomplete { wrong_cells });
                     }
                 }
             }
@@ -806,6 +812,8 @@ async fn handle_message(
 enum PlaceResult {
     Race {
         complete: bool,
+        all_filled: bool,
+        wrong_cells: u32,
         opponent_id: Option<i64>,
         duration: i64,
         p1_id: i64,
@@ -817,6 +825,8 @@ enum PlaceResult {
     },
     Shared {
         complete: bool,
+        all_filled: bool,
+        wrong_cells: u32,
         opponent_id: Option<i64>,
         my_score: u32,
         opp_score: u32,
