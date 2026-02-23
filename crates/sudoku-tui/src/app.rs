@@ -202,7 +202,12 @@ async fn run_loop(
                         }
                     }
                     Ok(AsyncResult::Connected(Err(e))) => {
-                        game.error_message = Some(format!("Connection failed: {}", e));
+                        // Clear stale token so next attempt triggers re-auth
+                        // (e.g. server DB was wiped on redeploy)
+                        *saved_token = None;
+                        *username = None;
+                        NetworkClient::clear_token();
+                        game.error_message = Some(format!("Connection failed: {} — please try again to re-authenticate", e));
                         game.pending_menu_action = None;
                         game.auth_status = None;
                         game.state = GameState::MultiplayerMenu;

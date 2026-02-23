@@ -245,6 +245,11 @@ impl NetworkClient {
         std::fs::write(path, json)
     }
 
+    /// Clear saved auth token from disk (called when token is rejected by server)
+    pub fn clear_token() {
+        let _ = std::fs::remove_file(auth_file_path());
+    }
+
     /// Load saved auth token from disk (skipped for local dev servers)
     pub fn load_token() -> Option<(String, String)> {
         if is_local_server() {
