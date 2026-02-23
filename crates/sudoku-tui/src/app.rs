@@ -9,12 +9,23 @@ use crossterm::terminal::{
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use tokio::task::JoinHandle;
 
 use crate::game::{Game, GameState};
 use crate::net::NetworkClient;
 use crate::ui;
-use sudoku_core::protocol::{AuthPollResponse, ClientMessage, GameMode, ServerMessage};
+use sudoku_core::protocol::{
+    AuthPollResponse, ClientMessage, DeviceAuthResponse, GameMode, LeaderboardEntry, ServerMessage,
+};
 use sudoku_core::Cell;
+
+/// Result types for background async operations
+enum AsyncResult {
+    AuthStarted(Result<DeviceAuthResponse, String>),
+    Connected(Result<NetworkClient, String>),
+    DevConnected(Result<(NetworkClient, String), String>),
+    LeaderboardLoaded(Result<Vec<LeaderboardEntry>, String>),
+}
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Install rustls crypto provider before any TLS usage
@@ -75,97 +86,72 @@ async fn run_loop(
     let tick_rate = Duration::from_millis(250);
     let mut auth_poll_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
 
+    // In-flight background task (only one at a time)
+    let mut inflight: Option<JoinHandle<AsyncResult>> = None;
+
     loop {
         terminal.draw(|f| ui::draw(f, game))?;
 
-        // Check for pending async operations BEFORE select — these are non-blocking flags
-        // set by key handlers that we execute here to avoid freezing the UI.
-        if game.pending_auth_start {
+        // Spawn background tasks for pending async operations.
+        // These run concurrently so the UI stays responsive.
+        if game.pending_auth_start && inflight.is_none() {
             game.pending_auth_start = false;
             game.state = GameState::AuthScreen;
             game.auth_status = Some("Connecting to server...".to_string());
-            // Re-render immediately to show the status
-            terminal.draw(|f| ui::draw(f, game))?;
 
-            match NetworkClient::start_device_auth().await {
-                Ok(resp) => {
-                    game.auth_code = Some(resp.user_code);
-                    game.auth_uri = Some(resp.verification_uri);
-                    game.auth_poll_interval = resp.interval.max(5);
-                    game.auth_polling = true;
-                    auth_poll_deadline = tokio::time::Instant::now()
-                        + Duration::from_secs(game.auth_poll_interval);
-                    game.auth_status =
-                        Some("Please enter the code shown below at the URL".to_string());
-                }
-                Err(e) => {
-                    game.auth_status = Some(format!("Auth failed: {}", e));
-                    game.auth_polling = false;
-                }
-            }
-            continue;
+            inflight = Some(tokio::spawn(async {
+                AsyncResult::AuthStarted(
+                    NetworkClient::start_device_auth()
+                        .await
+                        .map_err(|e| e.to_string()),
+                )
+            }));
         }
 
-        if game.pending_connect {
+        if game.pending_connect && inflight.is_none() {
             game.pending_connect = false;
             game.auth_status = Some("Connecting...".to_string());
-            terminal.draw(|f| ui::draw(f, game))?;
 
             if crate::net::client::is_local() && saved_token.is_none() {
-                // Dev mode: auth + connect in one shot
-                match NetworkClient::dev_auth_and_connect().await {
-                    Ok((client, name)) => {
-                        *username = Some(name);
-                        *net_client = Some(client);
-                        game.auth_status = None;
-                        if let Some(action) = game.pending_menu_action.take() {
-                            execute_menu_action(game, action, net_client);
-                        }
-                    }
-                    Err(e) => {
-                        game.error_message = Some(format!("Connection failed: {}", e));
-                        game.pending_menu_action = None;
-                        game.auth_status = None;
-                    }
-                }
-            } else if let Some(token) = saved_token.as_ref() {
-                match NetworkClient::connect(token).await {
-                    Ok(client) => {
-                        *net_client = Some(client);
-                        game.auth_status = None;
-                        if let Some(action) = game.pending_menu_action.take() {
-                            execute_menu_action(game, action, net_client);
-                        }
-                    }
-                    Err(e) => {
-                        game.error_message = Some(format!("Connection failed: {}", e));
-                        game.pending_menu_action = None;
-                        game.auth_status = None;
-                    }
-                }
+                inflight = Some(tokio::spawn(async {
+                    AsyncResult::DevConnected(
+                        NetworkClient::dev_auth_and_connect()
+                            .await
+                            .map_err(|e| e.to_string()),
+                    )
+                }));
+            } else if let Some(token) = saved_token.clone() {
+                inflight = Some(tokio::spawn(async move {
+                    AsyncResult::Connected(
+                        NetworkClient::connect(&token)
+                            .await
+                            .map_err(|e| e.to_string()),
+                    )
+                }));
             }
-            continue;
         }
 
-        if game.pending_leaderboard {
+        if game.pending_leaderboard && inflight.is_none() {
             game.pending_leaderboard = false;
             game.auth_status = Some("Loading leaderboard...".to_string());
-            terminal.draw(|f| ui::draw(f, game))?;
 
-            match NetworkClient::fetch_leaderboard().await {
-                Ok(entries) => {
-                    game.leaderboard_entries = entries;
-                    game.leaderboard_scroll = 0;
-                    game.state = GameState::Leaderboard;
-                    game.auth_status = None;
-                }
-                Err(e) => {
-                    game.error_message = Some(format!("Failed to load: {}", e));
-                    game.auth_status = None;
-                }
-            }
-            continue;
+            inflight = Some(tokio::spawn(async {
+                AsyncResult::LeaderboardLoaded(
+                    NetworkClient::fetch_leaderboard()
+                        .await
+                        .map_err(|e| e.to_string()),
+                )
+            }));
         }
+
+        // Build a future that resolves when the inflight task completes,
+        // or pends forever if there is no inflight task.
+        let inflight_fut = async {
+            match &mut inflight {
+                Some(handle) => handle.await,
+                None => std::future::pending().await,
+            }
+        };
 
         tokio::select! {
             maybe_event = event_stream.next() => {
@@ -173,8 +159,82 @@ async fn run_loop(
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
+                    // Allow Esc to cancel in-flight operations
+                    if key.code == KeyCode::Esc && inflight.is_some() {
+                        if let Some(handle) = inflight.take() {
+                            handle.abort();
+                        }
+                        game.auth_status = None;
+                        game.pending_menu_action = None;
+                        game.state = GameState::MultiplayerMenu;
+                        continue;
+                    }
                     if handle_key(game, key, net_client, username, saved_token) {
                         return Ok(());
+                    }
+                }
+            }
+            result = inflight_fut => {
+                inflight = None;
+                match result {
+                    Ok(AsyncResult::AuthStarted(Ok(resp))) => {
+                        game.auth_code = Some(resp.user_code);
+                        game.auth_uri = Some(resp.verification_uri);
+                        game.auth_poll_interval = resp.interval.max(5);
+                        game.auth_polling = true;
+                        auth_poll_deadline = tokio::time::Instant::now()
+                            + Duration::from_secs(game.auth_poll_interval);
+                        game.auth_status =
+                            Some("Please enter the code shown below at the URL".to_string());
+                    }
+                    Ok(AsyncResult::AuthStarted(Err(e))) => {
+                        game.auth_status = Some(format!("Auth failed: {}", e));
+                        game.auth_polling = false;
+                    }
+                    Ok(AsyncResult::Connected(Ok(client))) => {
+                        *net_client = Some(client);
+                        game.auth_status = None;
+                        if let Some(action) = game.pending_menu_action.take() {
+                            execute_menu_action(game, action, net_client);
+                        } else {
+                            // Post-auth connect: return to multiplayer menu
+                            game.state = GameState::MultiplayerMenu;
+                        }
+                    }
+                    Ok(AsyncResult::Connected(Err(e))) => {
+                        game.error_message = Some(format!("Connection failed: {}", e));
+                        game.pending_menu_action = None;
+                        game.auth_status = None;
+                        game.state = GameState::MultiplayerMenu;
+                    }
+                    Ok(AsyncResult::DevConnected(Ok((client, name)))) => {
+                        *username = Some(name);
+                        *net_client = Some(client);
+                        game.auth_status = None;
+                        if let Some(action) = game.pending_menu_action.take() {
+                            execute_menu_action(game, action, net_client);
+                        }
+                    }
+                    Ok(AsyncResult::DevConnected(Err(e))) => {
+                        game.error_message = Some(format!("Connection failed: {}", e));
+                        game.pending_menu_action = None;
+                        game.auth_status = None;
+                    }
+                    Ok(AsyncResult::LeaderboardLoaded(Ok(entries))) => {
+                        game.leaderboard_entries = entries;
+                        game.leaderboard_scroll = 0;
+                        game.state = GameState::Leaderboard;
+                        game.auth_status = None;
+                    }
+                    Ok(AsyncResult::LeaderboardLoaded(Err(e))) => {
+                        game.error_message = Some(format!("Failed to load: {}", e));
+                        game.auth_status = None;
+                    }
+                    Err(_) => {
+                        // JoinHandle error (task panicked or was cancelled)
+                        game.error_message = Some("Operation failed".to_string());
+                        game.auth_status = None;
+                        game.pending_menu_action = None;
                     }
                 }
             }
@@ -194,17 +254,16 @@ async fn run_loop(
                             game.auth_code = None;
                             game.auth_uri = None;
 
-                            match NetworkClient::connect(&token).await {
-                                Ok(client) => {
-                                    *net_client = Some(client);
-                                    game.auth_status = Some(format!("Logged in as {}", name));
-                                    game.state = GameState::MultiplayerMenu;
-                                }
-                                Err(e) => {
-                                    game.auth_status = Some(format!("Connection failed: {}", e));
-                                    game.state = GameState::MultiplayerMenu;
-                                }
-                            }
+                            // Spawn connect as a background task too
+                            let t = token.clone();
+                            inflight = Some(tokio::spawn(async move {
+                                AsyncResult::Connected(
+                                    NetworkClient::connect(&t)
+                                        .await
+                                        .map_err(|e| e.to_string()),
+                                )
+                            }));
+                            game.auth_status = Some(format!("Logged in as {} — connecting...", name));
                         }
                         Ok(AuthPollResponse::Pending) => {
                             auth_poll_deadline = tokio::time::Instant::now()

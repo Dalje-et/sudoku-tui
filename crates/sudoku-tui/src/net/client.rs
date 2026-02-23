@@ -1,12 +1,18 @@
 use futures_util::{SinkExt, StreamExt};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use sudoku_core::protocol::{
     AuthPollResponse, ClientMessage, DeviceAuthResponse, LeaderboardEntry, PlayerProfile,
     ServerMessage,
 };
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
+
+/// Timeout for HTTP requests (auth, leaderboard, etc.)
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timeout for WebSocket connection establishment
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const DEFAULT_SERVER_URL: &str = "wss://sudoku-tui-server.onrender.com";
 const LOCAL_SERVER_URL: &str = "ws://localhost:8080";
@@ -45,7 +51,12 @@ fn check_local_server() -> bool {
     .is_ok()
 }
 
+/// Returns true if we should use dev-mode shortcuts (silent auth, no token persistence).
+/// Set SUDOKU_PROD_AUTH=1 to force production auth flow even against a local server.
 pub fn is_local() -> bool {
+    if std::env::var("SUDOKU_PROD_AUTH").is_ok() {
+        return false;
+    }
     let url = server_url();
     url.contains("localhost") || url.contains("127.0.0.1")
 }
@@ -58,8 +69,7 @@ fn http_base_url() -> String {
 }
 
 fn is_local_server() -> bool {
-    let url = server_url();
-    url.contains("localhost") || url.contains("127.0.0.1")
+    is_local()
 }
 
 fn auth_file_path() -> PathBuf {
@@ -101,13 +111,12 @@ impl NetworkClient {
             None
         };
 
-        let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
-            &url,
-            None,
-            false,
-            connector,
+        let (ws_stream, _) = tokio::time::timeout(
+            WS_CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async_tls_with_config(&url, None, false, connector),
         )
-        .await?;
+        .await
+        .map_err(|_| "Connection timed out — server may be starting up, try again")??;
         let (mut ws_sink, mut ws_stream_rx) = ws_stream.split();
 
         let (client_tx, mut client_rx) = mpsc::unbounded_channel::<ClientMessage>();
@@ -169,7 +178,10 @@ impl NetworkClient {
     pub async fn start_device_auth(
     ) -> Result<DeviceAuthResponse, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/auth/device", http_base_url());
-        let resp = reqwest::Client::new().post(&url).send().await?;
+        let client = reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()?;
+        let resp = client.post(&url).send().await?;
         let body = resp.json::<DeviceAuthResponse>().await?;
         Ok(body)
     }
@@ -179,7 +191,10 @@ impl NetworkClient {
         user_code: &str,
     ) -> Result<AuthPollResponse, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/auth/poll", http_base_url());
-        let resp = reqwest::Client::new()
+        let client = reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()?;
+        let resp = client
             .post(&url)
             .json(&serde_json::json!({ "user_code": user_code }))
             .send()
@@ -192,7 +207,10 @@ impl NetworkClient {
     pub async fn fetch_leaderboard(
     ) -> Result<Vec<LeaderboardEntry>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/leaderboard", http_base_url());
-        let resp = reqwest::get(&url).await?;
+        let client = reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()?;
+        let resp = client.get(&url).send().await?;
         let entries = resp.json::<Vec<LeaderboardEntry>>().await?;
         Ok(entries)
     }
@@ -202,7 +220,10 @@ impl NetworkClient {
         username: &str,
     ) -> Result<PlayerProfile, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/profile/{}", http_base_url(), username);
-        let resp = reqwest::get(&url).await?;
+        let client = reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()?;
+        let resp = client.get(&url).send().await?;
         let profile = resp.json::<PlayerProfile>().await?;
         Ok(profile)
     }
