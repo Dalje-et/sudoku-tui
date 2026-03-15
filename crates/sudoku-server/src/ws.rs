@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -8,10 +6,10 @@ use std::time::{Duration, Instant};
 use axum::extract::ws::{Message, WebSocket};
 use tokio::sync::mpsc;
 
-use sudoku_core::elo::{calculate_elo, elo_change};
+use sudoku_core::elo::calculate_elo;
 use sudoku_core::protocol::{ClientMessage, GameMode, ServerMessage};
 use sudoku_core::validation::is_board_complete;
-use sudoku_core::{Board, Cell, Difficulty};
+use sudoku_core::{Board, Cell};
 
 use crate::db;
 use crate::state::*;
@@ -22,7 +20,7 @@ pub async fn handle_socket(
     mut socket: WebSocket,
     user_id: i64,
     username: String,
-    rating: i32,
+    initial_rating: i32,
 ) {
     state.connection_count.fetch_add(1, Ordering::Relaxed);
 
@@ -34,7 +32,7 @@ pub async fn handle_socket(
         ConnectionHandle {
             user_id,
             username: username.clone(),
-            rating,
+            rating: initial_rating,
             tx: tx.clone(),
             room_code: None,
             message_count: 0,
@@ -86,7 +84,12 @@ pub async fn handle_socket(
                             }
                         };
 
-                        handle_message(&state, user_id, &username, rating, &tx, client_msg).await;
+                        let current_rating = state
+                            .connections
+                            .get(&user_id)
+                            .map(|c| c.rating)
+                            .unwrap_or(initial_rating);
+                        handle_message(&state, user_id, &username, current_rating, &tx, client_msg).await;
                     }
                     Some(Ok(Message::Close(_))) | None => {
                         break;
@@ -145,7 +148,7 @@ async fn handle_message(
     msg: ClientMessage,
 ) {
     match msg {
-        ClientMessage::Auth { token } => {
+        ClientMessage::Auth { token: _ } => {
             // Already authenticated during WS upgrade; send confirmation.
             let _ = tx.send(ServerMessage::AuthOk {
                 username: username.to_string(),
@@ -457,7 +460,7 @@ async fn handle_message(
                         // All correct = game over. All filled but some wrong = notify player.
                         let all_correct = all_filled && my_correct == my_filled;
 
-                        let opp_filled = opponent_id
+                        let _opp_filled = opponent_id
                             .and_then(|oid| room.player_boards.get(&oid))
                             .map(|b| filled_count(b))
                             .unwrap_or(0);
@@ -478,8 +481,6 @@ async fn handle_message(
                             duration,
                             p1_id,
                             p2_id,
-                            my_filled,
-                            opp_filled,
                             my_correct,
                             opp_correct,
                         }
@@ -562,8 +563,6 @@ async fn handle_message(
                     duration,
                     p1_id,
                     p2_id,
-                    my_filled: _,
-                    opp_filled: _,
                     my_correct,
                     opp_correct,
                 } => {
@@ -818,8 +817,6 @@ enum PlaceResult {
         duration: i64,
         p1_id: i64,
         p2_id: Option<i64>,
-        my_filled: u32,
-        opp_filled: u32,
         my_correct: u32,
         opp_correct: u32,
     },

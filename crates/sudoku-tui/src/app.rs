@@ -500,7 +500,41 @@ fn handle_won_key(game: &mut Game, key: KeyEvent) -> bool {
 
 // ── Multiplayer key handlers ────────────────────────────────────────────
 
-const MP_MENU_ITEMS: &[&str] = &[
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuAction {
+    CreateRoom,
+    JoinRoom,
+    QuickMatch,
+    Leaderboard,
+    Back,
+}
+
+impl MenuAction {
+    pub const ALL: &[MenuAction] = &[
+        MenuAction::CreateRoom,
+        MenuAction::JoinRoom,
+        MenuAction::QuickMatch,
+        MenuAction::Leaderboard,
+        MenuAction::Back,
+    ];
+
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            MenuAction::CreateRoom => "Create Room",
+            MenuAction::JoinRoom => "Join Room",
+            MenuAction::QuickMatch => "Quick Match",
+            MenuAction::Leaderboard => "Leaderboard",
+            MenuAction::Back => "Back",
+        }
+    }
+
+    pub fn requires_auth(self) -> bool {
+        !matches!(self, MenuAction::Back)
+    }
+}
+
+pub const MP_MENU_ITEMS: &[&str] = &[
     "Create Room",
     "Join Room",
     "Quick Match",
@@ -554,24 +588,24 @@ fn handle_multiplayer_menu_key(
             game.menu_selection = (game.menu_selection + 1) % MP_MENU_ITEMS.len();
         }
         KeyCode::Enter => {
-            // Items 0-3 require auth + connection
-            if game.menu_selection < 4 && net_client.is_none() {
+            let action = MenuAction::ALL[game.menu_selection];
+            if action.requires_auth() && net_client.is_none() {
                 if crate::net::client::is_local() {
                     // Dev mode: silent auto-auth+connect
                     game.pending_connect = true;
-                    game.pending_menu_action = Some(game.menu_selection);
+                    game.pending_menu_action = Some(action);
                 } else if username.is_none() {
                     // Production: GitHub device flow
                     game.pending_auth_start = true;
                 } else if saved_token.is_some() {
                     // Already authed, just need to connect
                     game.pending_connect = true;
-                    game.pending_menu_action = Some(game.menu_selection);
+                    game.pending_menu_action = Some(action);
                 }
                 return false;
             }
 
-            execute_menu_action(game, game.menu_selection, net_client);
+            execute_menu_action(game, action, net_client);
         }
         KeyCode::Esc | KeyCode::Char('q') => {
             game.state = GameState::Menu;
@@ -584,12 +618,11 @@ fn handle_multiplayer_menu_key(
 /// Execute a multiplayer menu action (called after auth + connect are ready)
 fn execute_menu_action(
     game: &mut Game,
-    action: usize,
+    action: MenuAction,
     net_client: &mut Option<NetworkClient>,
 ) {
     match action {
-        0 => {
-            // Create Room
+        MenuAction::CreateRoom => {
             if let Some(client) = net_client.as_ref() {
                 client.send(ClientMessage::CreateRoom {
                     mode: GameMode::Race,
@@ -597,13 +630,11 @@ fn execute_menu_action(
                 });
             }
         }
-        1 => {
-            // Join Room
+        MenuAction::JoinRoom => {
             game.joining_room = true;
             game.room_input.clear();
         }
-        2 => {
-            // Quick Match
+        MenuAction::QuickMatch => {
             if let Some(client) = net_client.as_ref() {
                 client.send(ClientMessage::QuickMatch {
                     mode: GameMode::Race,
@@ -613,15 +644,12 @@ fn execute_menu_action(
             game.state = GameState::Lobby;
             game.room_code = None;
         }
-        3 => {
-            // Leaderboard — defer to async
+        MenuAction::Leaderboard => {
             game.pending_leaderboard = true;
         }
-        4 => {
-            // Back
+        MenuAction::Back => {
             game.state = GameState::Menu;
         }
-        _ => {}
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::app::MenuAction;
 use crate::hint::{find_hint, Hint, HintStage};
 use sudoku_core::protocol::LeaderboardEntry;
 use sudoku_core::puzzle::generate_puzzle;
@@ -25,6 +26,7 @@ pub enum Move {
         row: usize,
         col: usize,
         old: Cell,
+        #[allow(dead_code)]
         new: Cell,
     },
     Erase {
@@ -116,7 +118,7 @@ pub struct Game {
     pub pending_connect: bool,
     pub pending_leaderboard: bool,
     // What menu action to resume after connecting
-    pub pending_menu_action: Option<usize>,
+    pub pending_menu_action: Option<MenuAction>,
     // Leaderboard
     pub leaderboard_entries: Vec<LeaderboardEntry>,
     pub leaderboard_scroll: usize,
@@ -277,7 +279,7 @@ impl Game {
             new,
         });
 
-        if self.solution[r][c] != num {
+        if self.solution[r][c] != 0 && self.solution[r][c] != num {
             self.mistakes += 1;
         }
 
@@ -489,6 +491,7 @@ impl Game {
         self.board[self.selected_row][self.selected_col].value()
     }
 
+    #[allow(dead_code)]
     pub fn auto_pencil_marks(&mut self) {
         for r in 0..9 {
             for c in 0..9 {
@@ -499,6 +502,7 @@ impl Game {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_multiplayer(&self) -> bool {
         self.multiplayer.is_some()
     }

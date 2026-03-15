@@ -5,7 +5,7 @@ pub mod protocol;
 pub mod puzzle;
 pub mod validation;
 
-pub use board::{Board, Cell, SolutionBoard};
+pub use board::{Board, Cell, SolutionBoard, peers};
 pub use difficulty::Difficulty;
 pub use elo::calculate_elo;
 pub use protocol::{ClientMessage, ServerMessage};

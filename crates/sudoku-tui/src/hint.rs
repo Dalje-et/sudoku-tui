@@ -3,6 +3,7 @@ use sudoku_core::validation::get_candidates;
 
 #[derive(Clone, Debug)]
 pub struct Hint {
+    #[allow(dead_code)]
     pub technique: HintTechnique,
     pub target_row: usize,
     pub target_col: usize,
@@ -19,6 +20,7 @@ pub enum HintTechnique {
 }
 
 impl HintTechnique {
+    #[allow(dead_code)]
     pub fn label(&self) -> &str {
         match self {
             HintTechnique::NakedSingle => "Naked Single",

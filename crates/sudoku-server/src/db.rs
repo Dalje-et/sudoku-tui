@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use sqlx::{Row, SqlitePool};
 
 /// Create all tables if they don't exist.

@@ -17,9 +17,16 @@ const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_SERVER_URL: &str = "wss://sudoku-tui-server.onrender.com";
 const LOCAL_SERVER_URL: &str = "ws://localhost:8080";
 
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 static RESOLVED_URL: OnceLock<String> = OnceLock::new();
+
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .expect("Failed to build HTTP client")
+});
 
 /// Resolve the server URL once on first call.
 /// Priority: SUDOKU_SERVER_URL env var > local server if running > production.
@@ -66,10 +73,6 @@ fn http_base_url() -> String {
     ws_url
         .replace("wss://", "https://")
         .replace("ws://", "http://")
-}
-
-fn is_local_server() -> bool {
-    is_local()
 }
 
 fn auth_file_path() -> PathBuf {
@@ -178,10 +181,7 @@ impl NetworkClient {
     pub async fn start_device_auth(
     ) -> Result<DeviceAuthResponse, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/auth/device", http_base_url());
-        let client = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()?;
-        let resp = client.post(&url).send().await?;
+        let resp = HTTP_CLIENT.post(&url).send().await?;
         let body = resp.json::<DeviceAuthResponse>().await?;
         Ok(body)
     }
@@ -191,10 +191,7 @@ impl NetworkClient {
         user_code: &str,
     ) -> Result<AuthPollResponse, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/auth/poll", http_base_url());
-        let client = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()?;
-        let resp = client
+        let resp = HTTP_CLIENT
             .post(&url)
             .json(&serde_json::json!({ "user_code": user_code }))
             .send()
@@ -207,30 +204,25 @@ impl NetworkClient {
     pub async fn fetch_leaderboard(
     ) -> Result<Vec<LeaderboardEntry>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/leaderboard", http_base_url());
-        let client = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()?;
-        let resp = client.get(&url).send().await?;
+        let resp = HTTP_CLIENT.get(&url).send().await?;
         let entries = resp.json::<Vec<LeaderboardEntry>>().await?;
         Ok(entries)
     }
 
     /// Fetch player profile
+    #[allow(dead_code)]
     pub async fn fetch_profile(
         username: &str,
     ) -> Result<PlayerProfile, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/profile/{}", http_base_url(), username);
-        let client = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()?;
-        let resp = client.get(&url).send().await?;
+        let resp = HTTP_CLIENT.get(&url).send().await?;
         let profile = resp.json::<PlayerProfile>().await?;
         Ok(profile)
     }
 
     /// Save auth token to disk (skipped for local dev servers)
     pub fn save_token(token: &str, username: &str) -> std::io::Result<()> {
-        if is_local_server() {
+        if is_local() {
             return Ok(());
         }
         let path = auth_file_path();
@@ -252,7 +244,7 @@ impl NetworkClient {
 
     /// Load saved auth token from disk (skipped for local dev servers)
     pub fn load_token() -> Option<(String, String)> {
-        if is_local_server() {
+        if is_local() {
             return None;
         }
         let path = auth_file_path();

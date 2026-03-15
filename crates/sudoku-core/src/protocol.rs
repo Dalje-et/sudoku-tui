@@ -149,3 +149,69 @@ pub enum AuthPollResponse {
     Complete { token: String, username: String },
     Expired,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_message_roundtrip_place_number() {
+        let msg = ClientMessage::PlaceNumber { row: 3, col: 7, value: 5 };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMessage::PlaceNumber { row: 3, col: 7, value: 5 }));
+    }
+
+    #[test]
+    fn client_message_roundtrip_create_room() {
+        let msg = ClientMessage::CreateRoom { mode: GameMode::Shared, difficulty: Difficulty::Hard };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMessage::CreateRoom { mode: GameMode::Shared, difficulty: Difficulty::Hard }));
+    }
+
+    #[test]
+    fn client_message_roundtrip_unit_variants() {
+        for msg in [ClientMessage::Forfeit, ClientMessage::Rematch, ClientMessage::Ping] {
+            let json = serde_json::to_string(&msg).unwrap();
+            let _: ClientMessage = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn server_message_roundtrip_game_end() {
+        let msg = ServerMessage::GameEnd {
+            won: true,
+            your_score: 42,
+            opponent_score: 30,
+            elo_change: 16,
+            new_rating: 1216,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ServerMessage::GameEnd { won: true, elo_change: 16, .. }));
+    }
+
+    #[test]
+    fn server_message_roundtrip_unit_variants() {
+        for msg in [ServerMessage::WaitingForOpponent, ServerMessage::OpponentDisconnected, ServerMessage::Pong] {
+            let json = serde_json::to_string(&msg).unwrap();
+            let _: ServerMessage = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn auth_poll_response_tagged_serde() {
+        let pending = AuthPollResponse::Pending;
+        let json = serde_json::to_string(&pending).unwrap();
+        assert!(json.contains("\"status\":\"Pending\""));
+
+        let complete = AuthPollResponse::Complete {
+            token: "abc".into(),
+            username: "player1".into(),
+        };
+        let json = serde_json::to_string(&complete).unwrap();
+        let parsed: AuthPollResponse = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, AuthPollResponse::Complete { .. }));
+    }
+}
